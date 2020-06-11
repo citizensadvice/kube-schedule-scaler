@@ -1,7 +1,7 @@
 FROM python:3.8-alpine
 
 RUN apk add --no-cache bash
-RUN pip install pykube python-crontab
+RUN pip install --no-cache-dir pykube python-crontab
 
 ADD schedule_scaling /root/schedule_scaling
 
