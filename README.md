@@ -6,12 +6,13 @@ that don't need to be available 24/7 to reduce cluster resource utilization.
 
 ## Usage
 
-Just add the annotation to either your `Deployment`.
+Just add the annotation to your `Deployment`:
 
 ```
   annotations:
     zalando.org/schedule-actions: '[{"schedule": "10 18 * * *", "replicas": "3"}]'
 ```
+
 The following fields are available
 * `schedule` - Typical crontab format
 * `replicas` - the number of replicas to scale to
