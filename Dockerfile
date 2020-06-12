@@ -1,9 +1,16 @@
 FROM python:3.8-alpine
 
 RUN apk add --no-cache bash
-RUN pip install --no-cache-dir pykube python-crontab
+RUN pip install --no-cache-dir pykube croniter
 
-ADD schedule_scaling /root/schedule_scaling
+RUN adduser -u 1000 -D app && \
+    mkdir /app && \
+    chown app: /app
 
-ENV PYTHONPATH "${PYTHONPATH}:/root/schedule_scaling"
-CMD /root/schedule_scaling/scripts/startup.sh
+USER 1000
+WORKDIR /app
+
+COPY schedule_scaling/ /app/
+
+ENV PYTHONPATH "${PYTHONPATH}:/app/schedule_scaling"
+CMD ["python", "-u", "schedule_scaling.py"]
