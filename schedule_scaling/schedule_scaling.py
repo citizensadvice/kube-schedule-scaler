@@ -55,7 +55,7 @@ def parse_schedules(schedules, identifier):
 def get_delta_sec(schedule):
     # get current time
     now = datetime.now()
-    # get next execution time in unix timestamp
+    # get the last previous occurrence of the cron expression
     t = croniter(schedule, now).get_prev()
     # convert now to unix timestamp
     now = now.replace(tzinfo=timezone.utc).timestamp()
