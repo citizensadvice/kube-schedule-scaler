@@ -58,6 +58,8 @@ spec:
         app: kube-schedule-scaler
     spec:
       serviceAccountName: kube-schedule-scaler
+      securityContext:
+        runAsUser: 1000
       containers:
       - name: kube-schedule-scaler
         image: "citizensadvice/kube-schedule-scaler:latest"
