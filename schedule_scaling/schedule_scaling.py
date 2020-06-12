@@ -48,7 +48,7 @@ def parse_schedules(schedules, identifier):
     try:
         return json.loads(schedules)
     except Exception as err:
-        print('%s - Error in parsing JSON %s with error' % (identifier, schedules), err)
+        print("%s - Error in parsing JSON %s with error" % (identifier, schedules), err)
         return []
 
 
@@ -99,7 +99,7 @@ def run_hpa_action(deployment_name, namespace, min_replicas, max_replicas):
         # NOTE: this assumes that the HorizontalPodAutoscaler is called the same as the Deployment object
         hpa = pykube.HorizontalPodAutoscaler.objects(api).filter(namespace=namespace).get(name=deployment_name)
     except Exception as e:
-        print('HPA for deployment %(name)s in namespace %(namespace)s not found: {}'.format(e))
+        print("HPA for deployment {} in namespace {} not found: {}".format(deployment_name, namespace, e))
         return
 
     if hpa:
@@ -108,18 +108,18 @@ def run_hpa_action(deployment_name, namespace, min_replicas, max_replicas):
             hpa.update()
 
             if hpa.obj["spec"]["minReplicas"] == min_replicas:
-                print('HPA {} has been adjusted to minReplicas to {} at {}'.format(deployment_name, min_replicas, time))
+                print("HPA {} has been adjusted to minReplicas to {} at {}".format(deployment_name, min_replicas, time))
             else:
-                print('Something went wrong... HPA {} has not been scaled'.format(deployment_name))
+                print("Something went wrong... HPA {} has not been scaled".format(deployment_name))
 
         if max_replicas != None:
             hpa.obj["spec"]["maxReplicas"] = max_replicas
             hpa.update()
 
             if hpa.obj["spec"]["maxReplicas"] == max_replicas:
-                print('HPA {} has been adjusted to maxReplicas to {} at {}'.format(deployment_name, max_replicas, time))
+                print("HPA {} has been adjusted to maxReplicas to {} at {}".format(deployment_name, max_replicas, time))
             else:
-                print('Something went wrong... HPA {} has not been scaled'.format(deployment_name))
+                print("Something went wrong... HPA {} has not been scaled".format(deployment_name))
 
 
 if __name__ == "__main__":
