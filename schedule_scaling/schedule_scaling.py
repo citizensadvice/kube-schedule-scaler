@@ -2,11 +2,14 @@
 import pykube
 import json
 import logging
+import os
 from resources import Deployment
 from datetime import datetime, timedelta, timezone
 from time import sleep
 from croniter import croniter
 from resources import Deployment
+
+logging.getLogger().setLevel(os.environ.get('LOG_LEVEL', 'INFO'))
 
 def get_kube_api():
     """ Initiating the API from Service Account or when running locally from ~/.kube/config """
