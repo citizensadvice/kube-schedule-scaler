@@ -49,7 +49,7 @@ def parse_schedules(schedules, identifier):
     try:
         return json.loads(schedules)
     except Exception as err:
-        print("%s - Error in parsing JSON %s with error" % (identifier, schedules), err)
+        logging.error("%s - Error in parsing JSON %s with error" % (identifier, schedules), err)
         return []
 
 
@@ -71,7 +71,7 @@ def process_deployment(deployment, schedules):
         min_replicas = schedule.get("minReplicas", None)
         max_replicas = schedule.get("maxReplicas", None)
         schedule_expr = schedule.get("schedule", None)
-        print("Deployment: %s, Namespace: %s, Replicas: %s, MinReplicas: %s, MaxReplicas: %s, Schedule: %s" % (name, namespace, replicas, min_replicas, max_replicas, schedule_expr))
+        logging.debug("Deployment: %s, Namespace: %s, Replicas: %s, MinReplicas: %s, MaxReplicas: %s, Schedule: %s" % (name, namespace, replicas, min_replicas, max_replicas, schedule_expr))
         # if less than 60 seconds have passed from the trigger
         if get_delta_sec(schedule_expr) < 60:
             if replicas != None:
@@ -94,7 +94,7 @@ def scale_deployment(name, namespace, replicas):
     time = datetime.now().strftime("%d-%m-%Y %H:%M UTC")
     try:
         deployment.update()
-        print("Deployment {}/{} scaled to {} replicas at {}".format(namespace, name, replicas, time))
+        logging.info("Deployment {}/{} scaled to {} replicas at {}".format(namespace, name, replicas, time))
     except Exception as e:
         logging.error("Exception raised while updating deployment {}/{}".format(namespace, name))
         logging.exception(e)
@@ -108,7 +108,7 @@ def update_hpa_field(hpa, field, value):
     time = datetime.now().strftime("%d-%m-%Y %H:%M UTC")
     try:
         hpa.update()
-        print("HPA {}/{} {} set to {} at {}".format(hpa.namespace, hpa.name, field, value, time))
+        logging.info("HPA {}/{} {} set to {} at {}".format(hpa.namespace, hpa.name, field, value, time))
     except Exception as e:
         logging.error("Exception raised while updating HPA {}/{}".format(hpa.namespace, hpa.name))
         logging.exception(e)
@@ -128,10 +128,10 @@ def scale_hpa(name, namespace, min_replicas, max_replicas):
 
 
 if __name__ == "__main__":
-    print("Main loop started")
+    logging.info("Main loop started")
     while True:
-        print("Getting deployments")
+        logging.debug("Getting deployments")
         for deployment, schedules in deployments_to_scale().items():
             process_deployment(deployment, schedules)
-        print("Waiting 50 seconds")
+        logging.debug("Waiting 50 seconds")
         sleep(50)
