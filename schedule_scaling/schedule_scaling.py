@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import pykube
 import json
+import logging
 from resources import Deployment
 from datetime import datetime, timedelta, timezone
 from time import sleep
@@ -74,52 +75,56 @@ def process_deployment(deployment, schedules):
         # if less than 60 seconds have passed from the trigger
         if get_delta_sec(schedule_expr) < 60:
             if replicas != None:
-                run_deployment_action(name, namespace, int(replicas))
+                scale_deployment(name, namespace, int(replicas))
             if min_replicas or max_replicas:
-                run_hpa_action(name, namespace, int(min_replicas), int(max_replicas))
+                scale_hpa(name, namespace, int(min_replicas), int(max_replicas))
 
 
-def run_deployment_action(deployment_name, namespace, replicas):
+def scale_deployment(name, namespace, replicas):
+    try:
+        deployment = Deployment.objects(api).filter(namespace=namespace).get(name=name)
+    except pykube.exceptions.ObjectDoesNotExist:
+        logging.warning("Deployment {}/{} does not exist".format(namespace, name))
+        return
+
+    if replicas == None or replicas == deployment.replicas:
+        return
+    deployment.replicas = replicas
+
     time = datetime.now().strftime("%d-%m-%Y %H:%M UTC")
-    deployment = Deployment.objects(api).filter(namespace=namespace).get(name=deployment_name)
-
-    if replicas != None:
-        deployment.replicas = replicas
+    try:
         deployment.update()
-        if deployment.replicas == replicas:
-            print("Deployment {} scaled to {} replicas at {}".format(deployment_name, replicas, time))
-        else:
-            print("Something went wrong... deployment {} has not been scaled".format(deployment_name))
+        print("Deployment {}/{} scaled to {} replicas at {}".format(namespace, name, replicas, time))
+    except Exception as e:
+        logging.error("Exception raised while updating deployment {}/{}".format(namespace, name))
+        logging.exception(e)
 
 
-def run_hpa_action(deployment_name, namespace, min_replicas, max_replicas):
+def update_hpa_field(hpa, field, value):
+    if value == None or value == hpa.obj["spec"][field]:
+        return
+    hpa.obj["spec"][field] = value
+
     time = datetime.now().strftime("%d-%m-%Y %H:%M UTC")
+    try:
+        hpa.update()
+        print("HPA {}/{} {} set to {} at {}".format(hpa.namespace, hpa.name, field, value, time))
+    except Exception as e:
+        logging.error("Exception raised while updating HPA {}/{}".format(hpa.namespace, hpa.name))
+        logging.exception(e)
+
+
+def scale_hpa(name, namespace, min_replicas, max_replicas):
 
     try:
-        # NOTE: this assumes that the HorizontalPodAutoscaler is called the same as the Deployment object
-        hpa = pykube.HorizontalPodAutoscaler.objects(api).filter(namespace=namespace).get(name=deployment_name)
-    except Exception as e:
-        print("HPA for deployment {} in namespace {} not found: {}".format(deployment_name, namespace, e))
+        hpa = pykube.HorizontalPodAutoscaler.objects(api).filter(namespace=namespace).get(name=name)
+    except pykube.exceptions.ObjectDoesNotExist:
+        logging.warning("HPA {}/{} does not exist".format(namespace, name))
         return
 
     if hpa:
-        if min_replicas != None:
-            hpa.obj["spec"]["minReplicas"] = min_replicas
-            hpa.update()
-
-            if hpa.obj["spec"]["minReplicas"] == min_replicas:
-                print("HPA {} has been adjusted to minReplicas to {} at {}".format(deployment_name, min_replicas, time))
-            else:
-                print("Something went wrong... HPA {} has not been scaled".format(deployment_name))
-
-        if max_replicas != None:
-            hpa.obj["spec"]["maxReplicas"] = max_replicas
-            hpa.update()
-
-            if hpa.obj["spec"]["maxReplicas"] == max_replicas:
-                print("HPA {} has been adjusted to maxReplicas to {} at {}".format(deployment_name, max_replicas, time))
-            else:
-                print("Something went wrong... HPA {} has not been scaled".format(deployment_name))
+        update_hpa_field(hpa, "minReplicas", min_replicas)
+        update_hpa_field(hpa, "maxReplicas", max_replicas)
 
 
 if __name__ == "__main__":
