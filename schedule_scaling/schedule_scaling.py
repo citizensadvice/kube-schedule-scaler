@@ -70,17 +70,27 @@ def get_delta_sec(schedule):
 def process_deployment(deployment, schedules):
     namespace, name = deployment.split("/")
     for schedule in schedules:
+        # when provided, convert the values to int
         replicas = schedule.get("replicas", None)
+        if replicas:
+            replicas = int(replicas)
         min_replicas = schedule.get("minReplicas", None)
+        if min_replicas:
+            min_replicas = int(min_replicas)
         max_replicas = schedule.get("maxReplicas", None)
+        if max_replicas:
+            max_replicas = int(max_replicas)
+
         schedule_expr = schedule.get("schedule", None)
         logging.debug("Deployment: %s, Namespace: %s, Replicas: %s, MinReplicas: %s, MaxReplicas: %s, Schedule: %s" % (name, namespace, replicas, min_replicas, max_replicas, schedule_expr))
         # if less than 60 seconds have passed from the trigger
         if get_delta_sec(schedule_expr) < 60:
+            # replicas might equal 0 so we check that is not None
             if replicas != None:
-                scale_deployment(name, namespace, int(replicas))
+                scale_deployment(name, namespace, replicas)
+            # these can't be 0 by definition so checking for existence is enough
             if min_replicas or max_replicas:
-                scale_hpa(name, namespace, int(min_replicas), int(max_replicas))
+                scale_hpa(name, namespace, min_replicas, max_replicas)
 
 
 def scale_deployment(name, namespace, replicas):
@@ -103,20 +113,6 @@ def scale_deployment(name, namespace, replicas):
         logging.exception(e)
 
 
-def update_hpa_field(hpa, field, value):
-    if value == None or value == hpa.obj["spec"][field]:
-        return
-    hpa.obj["spec"][field] = value
-
-    time = datetime.now().strftime("%d-%m-%Y %H:%M UTC")
-    try:
-        hpa.update()
-        logging.info("HPA {}/{} {} set to {} at {}".format(hpa.namespace, hpa.name, field, value, time))
-    except Exception as e:
-        logging.error("Exception raised while updating HPA {}/{}".format(hpa.namespace, hpa.name))
-        logging.exception(e)
-
-
 def scale_hpa(name, namespace, min_replicas, max_replicas):
 
     try:
@@ -125,9 +121,26 @@ def scale_hpa(name, namespace, min_replicas, max_replicas):
         logging.warning("HPA {}/{} does not exist".format(namespace, name))
         return
 
-    if hpa:
-        update_hpa_field(hpa, "minReplicas", min_replicas)
-        update_hpa_field(hpa, "maxReplicas", max_replicas)
+    if not min_replicas and not max_replicas:
+        return
+
+    if hpa.obj["spec"]["minReplicas"] == min_replicas and
+       hpa.obj["spec"]["maxReplicas"] == max_replicas:
+        return
+
+    hpa.obj["spec"]["minReplicas"] = min_replicas
+    hpa.obj["spec"]["maxReplicas"] = max_replicas
+
+    time = datetime.now().strftime("%d-%m-%Y %H:%M UTC")
+    try:
+        hpa.update()
+        if min_replicas:
+            logging.info("HPA {}/{} minReplicas set to {} at {}".format(namespace, name, min_replicas, time))
+        if max_replicas:
+            logging.info("HPA {}/{} maxReplicas set to {} at {}".format(namespace, name, max_replicas, time))
+    except Exception as e:
+        logging.error("Exception raised while updating HPA {}/{}".format(namespace, name))
+        logging.exception(e)
 
 
 if __name__ == "__main__":
