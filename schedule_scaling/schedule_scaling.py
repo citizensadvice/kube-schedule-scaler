@@ -114,22 +114,31 @@ def scale_deployment(name, namespace, replicas):
 
 
 def scale_hpa(name, namespace, min_replicas, max_replicas):
-
     try:
         hpa = pykube.HorizontalPodAutoscaler.objects(api).filter(namespace=namespace).get(name=name)
     except pykube.exceptions.ObjectDoesNotExist:
         logging.warning("HPA {}/{} does not exist".format(namespace, name))
         return
 
+    # return if no values are provided
     if not min_replicas and not max_replicas:
         return
 
-    if hpa.obj["spec"]["minReplicas"] == min_replicas and
-       hpa.obj["spec"]["maxReplicas"] == max_replicas:
+    # return when both are provided but hpa is already up-to-date
+    if (hpa.obj["spec"]["minReplicas"] == min_replicas and
+        hpa.obj["spec"]["maxReplicas"] == max_replicas):
         return
 
-    hpa.obj["spec"]["minReplicas"] = min_replicas
-    hpa.obj["spec"]["maxReplicas"] = max_replicas
+    # return when only one of them is provided but hpa is already up-to-date
+    if ((not min_replicas and max_replicas == hpa.obj["spec"]["maxReplicas"]) or
+        (not max_replicas and min_replicas == hpa.obj["spec"]["minReplicas"])):
+        return
+
+    if min_replicas:
+        hpa.obj["spec"]["minReplicas"] = min_replicas
+
+    if max_replicas:
+        hpa.obj["spec"]["maxReplicas"] = max_replicas
 
     time = datetime.now().strftime("%d-%m-%Y %H:%M UTC")
     try:
