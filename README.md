@@ -52,6 +52,14 @@ When an `HorizontalPodAutoscaler` is managing the `Deployment`, it will ignore t
 
 In order for the `HorizontalPodAutoscaler` to be detected, it must be called with the same name as the `Deployment` that manages.
 
+## Configuration
+
+Configuration is done using environment variables:
+
+* `LOG_LEVEL` - change default log level, use `debug` to increase verbosity
+
+* `STARTUP_SCHEDULE_WINDOW_SECONDS` - a number of seconds to look back during the first schedule after startup, by setting this to `900` you'll make cron-schedule-scaler execute any configured schedules that happened up to 15 minutes before - this is designed to protect against missing schedules due to kube-schedule-scaler downtime (e.g. restarts, deployments, etc)
+
 ## Debugging
 
 If your scaling action has not been executed for some reason, you can check with the steps below:

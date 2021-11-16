@@ -66,27 +66,36 @@ def parse_schedules(schedules, identifier):
         return []
 
 
-def get_delta_sec(schedule):
+def get_delta_sec(schedule, now):
     """ Returns the number of seconds passed since last occurence of the given cron expression """
-    # get current time
-    now = datetime.now()
-    # get the last previous occurrence of the cron expression
-    time = croniter(schedule, now).get_prev()
+    # get the last previous occurrence of the cron expression, add 1 second here to handle cases
+    # when schedule should be executed now and delta is 0, now is rounded to full minutes, so it's
+    # ok anyway
+    time = croniter(schedule, now + timedelta(seconds=1)).get_prev()
     # convert now to unix timestamp
     now = now.replace(tzinfo=timezone.utc).timestamp()
     # return the delta
     return now - time
 
 
+def round_to_minute(time):
+    return datetime(time.year, time.month, time.day, time.hour, time.minute)
+
+
 def get_wait_sec():
     """ Return the number of seconds to wait before the next minute """
     now = datetime.now()
-    future = datetime(now.year, now.month, now.day, now.hour, now.minute) + timedelta(minutes=1)
+    future = round_to_minute(now) + timedelta(minutes=1)
     return (future - now).total_seconds()
 
 
-def process_deployment(deployment, schedules):
+def process_deployment(deployment, schedules, now, schedule_window_sec):
     """ Determine actions to run for the given deployment and list of schedules """
+    # newest cron settings to be applied, tuples with (delta seconds, desired replicas)
+    last_replicas = None
+    last_min_replicas = None
+    last_max_replicas = None
+
     namespace, name = deployment.split("/")
     for schedule in schedules:
         # when provided, convert the values to int
@@ -103,14 +112,33 @@ def process_deployment(deployment, schedules):
         schedule_expr = schedule.get("schedule", None)
         logging.debug("%s %s", deployment, schedule)
 
-        # if less than 60 seconds have passed from the trigger
-        if get_delta_sec(schedule_expr) < 60:
+        delta_sec = get_delta_sec(schedule_expr, now)
+
+        # if less than window seconds have passed from the trigger
+        if delta_sec < schedule_window_sec:
             # replicas might equal 0 so we check that is not None
             if replicas is not None:
-                scale_deployment(name, namespace, replicas)
+                if last_replicas is None or last_replicas[0] >= delta_sec:
+                    last_replicas = (delta_sec, replicas)
+
             # these can't be 0 by definition so checking for existence is enough
-            if min_replicas or max_replicas:
-                scale_hpa(name, namespace, min_replicas, max_replicas)
+            if min_replicas:
+                if last_min_replicas is None or last_min_replicas[0] >= delta_sec:
+                    last_min_replicas = (delta_sec, min_replicas)
+            if max_replicas:
+                if last_max_replicas is None or last_max_replicas[0] >= delta_sec:
+                    last_max_replicas = (delta_sec, max_replicas)
+
+    if last_replicas:
+        scale_deployment(name, namespace, last_replicas[1])
+
+    if last_min_replicas or last_max_replicas:
+        scale_hpa(
+            name,
+            namespace,
+            None if last_min_replicas is None else last_min_replicas[1],
+            None if last_max_replicas is None else last_max_replicas[1]
+        )
 
 
 def scale_deployment(name, namespace, replicas):
@@ -176,9 +204,23 @@ def scale_hpa(name, namespace, min_replicas, max_replicas):
 
 if __name__ == "__main__":
     logging.info("Main loop started")
+    last_process_time = round_to_minute(datetime.now())
+
+    startup_schedule_window_sec = os.environ.get("STARTUP_SCHEDULE_WINDOW_SECONDS")
+    if startup_schedule_window_sec:
+        logging.info(
+            "Running the first loop executing schedules old up to %s seconds",
+            startup_schedule_window_sec)
+        last_process_time = last_process_time - timedelta(seconds=int(startup_schedule_window_sec))
+
     while True:
         logging.debug("Waiting until the next minute")
         sleep(get_wait_sec())
+
+        now = round_to_minute(datetime.now())
+        schedule_window_sec = max(60, (now - last_process_time).total_seconds())
+        last_process_time = now
+
         logging.debug("Getting deployments")
         for d, s in deployments_to_scale().items():
-            process_deployment(d, s)
+            process_deployment(d, s, now, schedule_window_sec)
