@@ -4,7 +4,7 @@ import os
 import json
 import logging
 import dateutil.tz
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from time import sleep
 
 import pykube
