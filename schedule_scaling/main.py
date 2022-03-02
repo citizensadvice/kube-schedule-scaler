@@ -3,6 +3,7 @@
 import os
 import json
 import logging
+import dateutil.tz
 from datetime import datetime, timezone, timedelta
 from time import sleep
 
@@ -66,14 +67,20 @@ def parse_schedules(schedules, identifier):
         return []
 
 
-def get_delta_sec(schedule):
+def get_delta_sec(schedule, timezone_name=None):
     """ Returns the number of seconds passed since last occurence of the given cron expression """
+    # localize the time to the provided timezone, if specified
+    if not timezone_name:
+        tz = None
+    else:
+        tz = dateutil.tz.gettz(timezone_name)
+
     # get current time
-    now = datetime.now()
+    now = datetime.now(tz)
     # get the last previous occurrence of the cron expression
     time = croniter(schedule, now).get_prev()
     # convert now to unix timestamp
-    now = now.replace(tzinfo=timezone.utc).timestamp()
+    now = now.timestamp()
     # return the delta
     return now - time
 
@@ -101,10 +108,11 @@ def process_deployment(deployment, schedules):
             max_replicas = int(max_replicas)
 
         schedule_expr = schedule.get("schedule", None)
+        schedule_timezone = schedule.get("tz", None)
         logging.debug("%s %s", deployment, schedule)
 
         # if less than 60 seconds have passed from the trigger
-        if get_delta_sec(schedule_expr) < 60:
+        if get_delta_sec(schedule_expr, schedule_timezone) < 60:
             # replicas might equal 0 so we check that is not None
             if replicas is not None:
                 scale_deployment(name, namespace, replicas)

@@ -24,6 +24,7 @@ Just add the annotation to your `Deployment`:
 The following fields are available:
 
 - `schedule` - cron expression for the schedule
+- `tz` - timezone override (e.g. `Europe/London`)
 - `replicas` - the number of replicas to scale to
 - `minReplicas` - in combination with an `HorizontalPodAutoscaler`, will adjust the min number of replicas
 - `maxReplicas` - in combination with an `HorizontalPodAutoscaler`, will adjust the max number of replicas
