@@ -36,7 +36,7 @@ spec:
         runAsGroup: 65534
       containers:
         - name: sleep
-          image: 979633842206.dkr.ecr.eu-west-1.amazonaws.com/docker-hub/library/busybox:1.33.1
+          image: docker.io/library/busybox:1.36
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -75,7 +75,7 @@ spec:
         runAsGroup: 65534
       containers:
         - name: sleep
-          image: 979633842206.dkr.ecr.eu-west-1.amazonaws.com/docker-hub/library/busybox:1.33.1
+          image: docker.io/library/busybox:1.36
           imagePullPolicy: IfNotPresent
           resources:
             requests:
