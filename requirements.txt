@@ -1,2 +1,2 @@
-pykube-ng==22.1.0
-croniter==1.3.5
+pykube-ng==23.6.0
+croniter==2.0.3
