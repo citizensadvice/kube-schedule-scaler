@@ -82,3 +82,13 @@ $ kubectl logs -n kube-schedule-scaler kube-schedule-scaler-844b6d5888-p9tc4 | g
 ```
 
 You can change the log level using the `LOG_LEVEL` environment variable (e.g. `LOG_LEVEL=DEBUG`)
+
+## Testing
+
+To run the tests you will need:
+
+- kube-schedule-scaler installed in a working k8s cluster (e.g. Minikube)
+- pytest (can be installed with pip, in a virtualenv for example)
+
+The tests will create some deployment and hpa resources with the proper annotation and verify that they are scaled properly.
+If you want to test your local build, you can [run it in Minikube](https://stackoverflow.com/a/42564211).
