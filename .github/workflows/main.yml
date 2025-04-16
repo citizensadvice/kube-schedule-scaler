@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
     - name: Extract repo name
       shell: bash
       run: |-
@@ -25,12 +25,12 @@ jobs:
       id: extract_repo_name
     - name: Docker meta
       id: docker_meta
-      uses: crazy-max/ghaction-docker-meta@v1
+      uses: crazy-max/ghaction-docker-meta@v5
       with:
         images: public.ecr.aws/citizensadvice/${{ steps.extract_repo_name.outputs.repo_name }}
         tag-sha: true
     - name: Login to AWS Elastic Container Registry
-      uses: docker/login-action@v1
+      uses: docker/login-action@v3
       with:
         registry: public.ecr.aws
         username: ${{ secrets.PUBLIC_PUSH_ECR_AWS_KEY }}
