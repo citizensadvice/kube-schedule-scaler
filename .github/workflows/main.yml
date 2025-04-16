@@ -20,7 +20,8 @@ jobs:
       uses: actions/checkout@v2
     - name: Extract repo name
       shell: bash
-      run: echo "##[set-output name=repo_name;]$(echo ${GITHUB_REPOSITORY} | sed "s/.*\///g" | sed "s/-docker$//")"
+      run: |-
+        echo "repo_name=$(echo ${GITHUB_REPOSITORY} | sed 's/.*\///g' | sed 's/-docker$//')" >> $GITHUB_OUTPUT
       id: extract_repo_name
     - name: Docker meta
       id: docker_meta
