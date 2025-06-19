@@ -12,6 +12,7 @@ on:
       - "v[0-9]*"
     tags:
       - v*
+      - urllib3-2.3.0
 jobs:
   build:
     runs-on: ubuntu-24.04
