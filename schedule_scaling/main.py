@@ -34,7 +34,7 @@ def deployments_to_scale():
         schedule_actions = parse_schedules(annotations.get(
             "zalando.org/schedule-actions", "[]"), f_deployment)
 
-        if schedule_actions is None or len(schedule_actions) == 0:
+        if not schedule_actions:
             continue
 
         deployments.append([deployment.metadata["name"]])
@@ -86,13 +86,13 @@ def process_deployment(deployment, schedules):
     for schedule in schedules:
         # when provided, convert the values to int
         replicas = schedule.get("replicas", None)
-        if replicas:
+        if replicas is not None:
             replicas = int(replicas)
         min_replicas = schedule.get("minReplicas", None)
-        if min_replicas:
+        if min_replicas is not None:
             min_replicas = int(min_replicas)
         max_replicas = schedule.get("maxReplicas", None)
-        if max_replicas:
+        if max_replicas is not None:
             max_replicas = int(max_replicas)
 
         schedule_expr = schedule.get("schedule", None)
@@ -101,11 +101,9 @@ def process_deployment(deployment, schedules):
 
         # if less than 60 seconds have passed from the trigger
         if get_delta_sec(schedule_expr, schedule_timezone) < 60:
-            # replicas might equal 0 so we check that is not None
             if replicas is not None:
                 scale_deployment(name, namespace, replicas)
-            # these can't be 0 by definition so checking for existence is enough
-            if min_replicas or max_replicas:
+            if min_replicas is not None or max_replicas is not None:
                 scale_hpa(name, namespace, min_replicas, max_replicas)
 
 
@@ -154,9 +152,9 @@ def scale_hpa(name, namespace, min_replicas, max_replicas):
 
     try:
         hpa.patch({"spec": patch})
-        if min_replicas:
+        if min_replicas is not None:
             logging.info("HPA %s/%s minReplicas set to %s", namespace, name, min_replicas)
-        if max_replicas:
+        if max_replicas is not None:
             logging.info("HPA %s/%s maxReplicas set to %s", namespace, name, max_replicas)
     except pykube.exceptions.HTTPError as err:
         logging.error("Exception raised while patching HPA %s/%s", namespace, name)
