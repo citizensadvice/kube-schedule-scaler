@@ -27,20 +27,18 @@ def deployments_to_scale():
     """ Getting the deployments configured for schedule scaling """
     deployments = []
     scaling_dict = {}
-    for namespace in list(pykube.Namespace.objects(api)):
-        namespace = str(namespace)
-        for deployment in pykube.Deployment.objects(api).filter(namespace=namespace):
-            annotations = deployment.metadata.get("annotations", {})
-            f_deployment = str(namespace + "/" + str(deployment))
+    for deployment in pykube.Deployment.objects(api).filter(namespace=pykube.all):
+        f_deployment = (deployment.namespace, deployment.name)
 
-            schedule_actions = parse_schedules(annotations.get(
-                "zalando.org/schedule-actions", "[]"), f_deployment)
+        annotations = deployment.metadata.get("annotations", {})
+        schedule_actions = parse_schedules(annotations.get(
+            "zalando.org/schedule-actions", "[]"), f_deployment)
 
-            if schedule_actions is None or len(schedule_actions) == 0:
-                continue
+        if schedule_actions is None or len(schedule_actions) == 0:
+            continue
 
-            deployments.append([deployment.metadata["name"]])
-            scaling_dict[f_deployment] = schedule_actions
+        deployments.append([deployment.metadata["name"]])
+        scaling_dict[f_deployment] = schedule_actions
     if not deployments:
         logging.info("No deployment is configured for schedule scaling")
 
@@ -84,7 +82,7 @@ def get_wait_sec():
 
 def process_deployment(deployment, schedules):
     """ Determine actions to run for the given deployment and list of schedules """
-    namespace, name = deployment.split("/")
+    namespace, name = deployment
     for schedule in schedules:
         # when provided, convert the values to int
         replicas = schedule.get("replicas", None)
@@ -124,31 +122,17 @@ def scale_deployment(name, namespace, replicas):
         return
 
     try:
-        try:
-            try:
-                deployment.patch({"spec": {"replicas": replicas}}, subresource="scale")
-            finally:
-                deployment.reload()  # reload to fetch whole updated Deployment
-        except pykube.exceptions.HTTPError as e:
-            # XXX: In previous version deployment.update() was always used. It was unnecessary, but after moving to a
-            # subresource patch we've lost backward compatibility, as previous RBAC "patch" on "deployments" doesn't
-            # work. So if we get an 403 pring a warning and try again, this time with full resource update.
-            if e.code == 403:
-                logging.warning(
-                        "Failed to apply patch on a 'scale' subresource, failing back to a full update. "
-                        "Consider upgrading RBAC deployment.")
-                deployment.replicas = replicas
-                deployment.update()
-            else:
-                raise
+        deployment.patch({"spec": {"replicas": replicas}}, subresource="scale")
         logging.info("Deployment %s/%s scaled to %s replicas", namespace, name, replicas)
+
     except pykube.exceptions.HTTPError as err:
-        logging.error("Exception raised while updating deployment %s/%s", namespace, name)
+        logging.error("Exception raised while patching deployment %s/%s", namespace, name)
         logging.exception(err)
 
 
 def scale_hpa(name, namespace, min_replicas, max_replicas):
     """ Adjust hpa min and max number of replicas """
+
     try:
         hpa = pykube.HorizontalPodAutoscaler.objects(
             api).filter(namespace=namespace).get(name=name)
@@ -156,34 +140,26 @@ def scale_hpa(name, namespace, min_replicas, max_replicas):
         logging.warning("HPA %s/%s does not exist", namespace, name)
         return
 
-    # return if no values are provided
-    if not min_replicas and not max_replicas:
+    patch = {}
+
+    spec = hpa.obj["spec"]
+    if min_replicas is not None and min_replicas != spec["minReplicas"]:
+        patch["minReplicas"] = min_replicas
+
+    if max_replicas is not None and max_replicas != spec["maxReplicas"]:
+        patch["maxReplicas"] = max_replicas
+
+    if not patch:
         return
-
-    # return when both are provided but hpa is already up-to-date
-    if (hpa.obj["spec"]["minReplicas"] == min_replicas and
-            hpa.obj["spec"]["maxReplicas"] == max_replicas):
-        return
-
-    # return when only one of them is provided but hpa is already up-to-date
-    if ((not min_replicas and max_replicas == hpa.obj["spec"]["maxReplicas"]) or
-            (not max_replicas and min_replicas == hpa.obj["spec"]["minReplicas"])):
-        return
-
-    if min_replicas:
-        hpa.obj["spec"]["minReplicas"] = min_replicas
-
-    if max_replicas:
-        hpa.obj["spec"]["maxReplicas"] = max_replicas
 
     try:
-        hpa.update()
+        hpa.patch({"spec": patch})
         if min_replicas:
             logging.info("HPA %s/%s minReplicas set to %s", namespace, name, min_replicas)
         if max_replicas:
             logging.info("HPA %s/%s maxReplicas set to %s", namespace, name, max_replicas)
     except pykube.exceptions.HTTPError as err:
-        logging.error("Exception raised while updating HPA %s/%s", namespace, name)
+        logging.error("Exception raised while patching HPA %s/%s", namespace, name)
         logging.exception(err)
 
 
