@@ -27,20 +27,19 @@ def deployments_to_scale():
     """ Getting the deployments configured for schedule scaling """
     deployments = []
     scaling_dict = {}
-    for namespace in list(pykube.Namespace.objects(api)):
-        namespace = str(namespace)
-        for deployment in pykube.Deployment.objects(api).filter(namespace=namespace):
-            annotations = deployment.metadata.get("annotations", {})
-            f_deployment = str(namespace + "/" + str(deployment))
+    for deployment in pykube.Deployment.objects(api).filter(namespace=pykube.all):
+        annotations = deployment.metadata.get("annotations", {})
+        namespace = deployment.metadata["namespace"]
+        f_deployment = str(namespace + "/" + str(deployment))
 
-            schedule_actions = parse_schedules(annotations.get(
-                "zalando.org/schedule-actions", "[]"), f_deployment)
+        schedule_actions = parse_schedules(annotations.get(
+            "zalando.org/schedule-actions", "[]"), f_deployment)
 
-            if schedule_actions is None or len(schedule_actions) == 0:
-                continue
+        if schedule_actions is None or len(schedule_actions) == 0:
+            continue
 
-            deployments.append([deployment.metadata["name"]])
-            scaling_dict[f_deployment] = schedule_actions
+        deployments.append([deployment.metadata["name"]])
+        scaling_dict[f_deployment] = schedule_actions
     if not deployments:
         logging.info("No deployment is configured for schedule scaling")
 
