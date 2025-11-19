@@ -176,15 +176,27 @@ def scale_hpa(name, namespace, min_replicas, max_replicas):
     if max_replicas:
         hpa.obj["spec"]["maxReplicas"] = max_replicas
 
-    try:
-        hpa.update()
-        if min_replicas:
-            logging.info("HPA %s/%s minReplicas set to %s", namespace, name, min_replicas)
-        if max_replicas:
-            logging.info("HPA %s/%s maxReplicas set to %s", namespace, name, max_replicas)
-    except pykube.exceptions.HTTPError as err:
-        logging.error("Exception raised while updating HPA %s/%s", namespace, name)
-        logging.exception(err)
+    # Retry logic: attempt up to 5 times with 5 second intervals
+    max_retries = 5
+    retry_delay = 5
+    for attempt in range(max_retries):
+        try:
+            hpa.update()
+            if min_replicas:
+                logging.info("HPA %s/%s minReplicas set to %s", namespace, name, min_replicas)
+            if max_replicas:
+                logging.info("HPA %s/%s maxReplicas set to %s", namespace, name, max_replicas)
+            break  # Success, exit retry loop
+        except pykube.exceptions.HTTPError as err:
+            if attempt < max_retries - 1:
+                logging.warning("Exception raised while updating HPA %s/%s (attempt %d/%d). Retrying in %d seconds...",
+                               namespace, name, attempt + 1, max_retries, retry_delay)
+                logging.exception(err)
+                sleep(retry_delay)
+            else:
+                logging.error("Exception raised while updating HPA %s/%s after %d attempts. Giving up.",
+                             namespace, name, max_retries)
+                logging.exception(err)
 
 
 if __name__ == "__main__":
