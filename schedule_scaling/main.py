@@ -102,6 +102,9 @@ def process_deployment(deployment: tuple[str, str], schedules: list[dict]) -> No
 
         schedule_expr = schedule.get("schedule", None)
 
+        if not schedule_expr:
+            return
+
         schedule_timezone = schedule.get("tz", None)
         logging.debug("%s %s", deployment, schedule)
 
