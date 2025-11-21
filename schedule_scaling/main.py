@@ -85,7 +85,7 @@ def get_wait_sec() -> float:
     return (future - now).total_seconds()
 
 
-def process_deployment(deployment: tuple[str, str], schedules: list[dict]) -> None:
+def process_deployment(deployment: tuple[str, str], schedules: list[dict[str, str]]) -> None:
     """Determine actions to run for the given deployment and list of schedules"""
     namespace, name = deployment
     for schedule in schedules:
@@ -116,7 +116,7 @@ def process_deployment(deployment: tuple[str, str], schedules: list[dict]) -> No
                 scale_hpa(name, namespace, min_replicas, max_replicas)
 
 
-def scale_deployment(name, namespace, replicas):
+def scale_deployment(name: str, namespace: str, replicas: int) -> None:
     """Scale the deployment to the given number of replicas"""
     try:
         deployment = (
@@ -126,7 +126,7 @@ def scale_deployment(name, namespace, replicas):
         logging.warning("Deployment %s/%s does not exist", namespace, name)
         return
 
-    if replicas is None or replicas == deployment.replicas:
+    if replicas == deployment.replicas:
         return
 
     try:
