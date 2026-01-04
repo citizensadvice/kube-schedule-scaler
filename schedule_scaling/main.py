@@ -208,7 +208,6 @@ def watch_deployments(ds: DeploymentStore) -> None:
                 apps_v1.list_deployment_for_all_namespaces,
                 resource_version=last_resource_version,
                 allow_watch_bookmarks=True,
-                timeout_seconds=3,
             )
 
             for event in stream:
