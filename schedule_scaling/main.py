@@ -284,7 +284,7 @@ class Collector:
             logging.debug(f"queue items: {list(queue.queue)}")
             # wait until next minute but wake up if you have to shutdown
             with cls.condition:
-                cls.condition.wait(timeout=get_wait_sec())
+                cls.condition.wait_for(lambda: shutdown, timeout=get_wait_sec())
 
         logging.info("Collector thread: exit")
 
