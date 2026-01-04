@@ -313,6 +313,12 @@ def handle_shutdown(
     """Handle shutdown related signals"""
     global shutdown
     global exit_status_code
+
+    if shutdown:
+        # it means it's been already triggered by another signal before
+        # no need to do the work twice and it can cause issues
+        return
+
     sig_str = strsignal(signum)
     sig_str = sig_str.split(":")[0] if sig_str else "Unknown"
     logging.info(f"Received {sig_str}: exiting gracefully")
