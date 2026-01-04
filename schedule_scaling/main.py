@@ -14,10 +14,12 @@ from queue import Queue
 from signal import SIGABRT, SIGINT, SIGQUIT, SIGTERM, signal, strsignal
 from sys import exit
 from types import FrameType
+from typing import cast
 
 import dateutil
 from croniter import croniter
 from kubernetes import client, config, watch
+from kubernetes.client.models import V1Deployment, V1ObjectMeta
 from kubernetes.client.rest import ApiException
 
 # client is shared across the program
@@ -210,30 +212,37 @@ def watch_deployments(ds: DeploymentStore) -> None:
             )
 
             for event in stream:
+                if not isinstance(event, dict):
+                    logging.warning(f"Skipping non dict event data: {event}")
+                    continue
+
                 # watch can keep running for a long time so we need this here
                 if shutdown:
                     logging.info("Watcher thread: exit")
                     return
 
-                obj = event["object"]
+                obj: dict | V1Deployment = event["object"]
                 event_type = event["type"]
 
                 # some events (e.g. BOOKMARK) return a dict
                 if isinstance(obj, dict):
                     last_resource_version = obj["metadata"]["resourceVersion"]
                 else:
-                    last_resource_version = obj.metadata.resource_version
+                    last_resource_version = cast(
+                        V1ObjectMeta, obj.metadata
+                    ).resource_version
                 logging.debug(f"watch last_resource_version -> {last_resource_version}")
 
                 match event_type:
                     case "ADDED" | "MODIFIED" | "DELETED":
+                        metadata = cast(V1ObjectMeta, obj.metadata)
                         logging.debug(
-                            f"watch {event_type}: {obj.metadata.namespace}/{obj.metadata.name}"
+                            f"watch {event_type}: {metadata.namespace}/{metadata.name}"
                         )
-                        key = (obj.metadata.namespace, obj.metadata.name)
+                        key = (cast(str, metadata.namespace), cast(str, metadata.name))
 
                         if event_type != "DELETED" and (
-                            schedules := obj.metadata.annotations.get(
+                            schedules := cast(dict[str, str], metadata.annotations).get(
                                 "zalando.org/schedule-actions"
                             )
                         ):
