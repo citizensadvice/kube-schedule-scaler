@@ -15,9 +15,18 @@ from signal import SIGABRT, SIGINT, SIGQUIT, SIGTERM, signal, strsignal
 from sys import exit
 from types import FrameType
 
-import pykube
-import requests
 from croniter import croniter
+from kubernetes import client, config, watch
+from kubernetes.client.rest import ApiException
+
+# client is shared across the program
+try:
+    config.load_incluster_config()
+except config.ConfigException:
+    config.load_kube_config()
+
+apps_v1 = client.AppsV1Api()
+autoscaling_v1 = client.AutoscalingV1Api()
 
 # custom type
 ScheduleActions = list[dict[str, str]]
@@ -37,11 +46,6 @@ logging.basicConfig(
 class ScaleTarget(Enum):
     DEPLOYMENT = 0
     HORIZONAL_POD_AUTOSCALER = 1
-
-
-def get_kube_api() -> pykube.HTTPClient:
-    """Initiating the API from Service Account or when running locally from ~/.kube/config"""
-    return pykube.HTTPClient(pykube.KubeConfig.from_env())
 
 
 @dataclass
@@ -134,62 +138,40 @@ def process_deployment(
 
 def scale_deployment(name: str, namespace: str, replicas: int) -> None:
     """Scale the deployment to the given number of replicas"""
-
-    api = get_kube_api()
     try:
-        deployment = (
-            pykube.Deployment.objects(api).filter(namespace=namespace).get(name=name)
+        patch_body = {"spec": {"replicas": replicas}}
+        apps_v1.patch_namespaced_deployment_scale(
+            name=name, namespace=namespace, body=patch_body
         )
-    except pykube.exceptions.ObjectDoesNotExist:
-        logging.warning("Deployment %s/%s does not exist", namespace, name)
-        return
-
-    if replicas == deployment.replicas:
-        return
-
-    try:
-        deployment.patch({"spec": {"replicas": replicas}}, subresource="scale")
         logging.info(
             "Deployment %s/%s scaled to %s replicas", namespace, name, replicas
         )
-
-    except pykube.exceptions.HTTPError as err:
-        logging.error(
-            "Exception raised while patching deployment %s/%s", namespace, name
-        )
-        logging.exception(err)
+    except ApiException as e:
+        if e.status == 404:
+            logging.warning("Deployment %s/%s not found", namespace, name)
+        else:
+            logging.error("API error patching deployment %s/%s: %s", namespace, name, e)
 
 
 def scale_hpa(
     name: str, namespace: str, min_replicas: int | None, max_replicas: int | None
 ) -> None:
-    """Adjust hpa min and max number of replicas"""
+    """Adjust HPA min/max replicas via a direct patch"""
 
-    api = get_kube_api()
+    patch_body = {}
+    if min_replicas is not None:
+        patch_body["minReplicas"] = min_replicas
+    if max_replicas is not None:
+        patch_body["maxReplicas"] = max_replicas
+
+    if not patch_body:
+        return
+
     try:
-        hpa = (
-            pykube.HorizontalPodAutoscaler.objects(api)
-            .filter(namespace=namespace)
-            .get(name=name)
+        autoscaling_v1.patch_namespaced_horizontal_pod_autoscaler(
+            name=name, namespace=namespace, body={"spec": patch_body}
         )
-    except pykube.exceptions.ObjectDoesNotExist:
-        logging.warning("HPA %s/%s does not exist", namespace, name)
-        return
 
-    patch = {}
-
-    spec = hpa.obj["spec"]
-    if min_replicas is not None and min_replicas != spec["minReplicas"]:
-        patch["minReplicas"] = min_replicas
-
-    if max_replicas is not None and max_replicas != spec["maxReplicas"]:
-        patch["maxReplicas"] = max_replicas
-
-    if not patch:
-        return
-
-    try:
-        hpa.patch({"spec": patch})
         if min_replicas:
             logging.info(
                 "HPA %s/%s minReplicas set to %s", namespace, name, min_replicas
@@ -198,9 +180,12 @@ def scale_hpa(
             logging.info(
                 "HPA %s/%s maxReplicas set to %s", namespace, name, max_replicas
             )
-    except pykube.exceptions.HTTPError as err:
-        logging.error("Exception raised while patching HPA %s/%s", namespace, name)
-        logging.exception(err)
+
+    except ApiException as e:
+        if e.status == 404:
+            logging.warning("HPA %s/%s not found", namespace, name)
+        else:
+            logging.error("API error patching HPA %s/%s: %s", namespace, name, e)
 
 
 def watch_deployments(ds: DeploymentStore) -> None:
@@ -208,55 +193,68 @@ def watch_deployments(ds: DeploymentStore) -> None:
     global shutdown
     logging.info("Starting watcher thread")
 
+    w = watch.Watch()
+
     last_resource_version = None
     while not shutdown:
         try:
-            # avoid stale tokens by initializing the client at every reconnect
-            client = pykube.HTTPClient(pykube.KubeConfig.from_env(), timeout=120)
+            # watch bookmarks help with having the latest resource version
+            # necessary to resume the event stream (on reconnect) without
+            # getting 410 "Resource version too old" errors
+            stream = w.stream(
+                apps_v1.list_deployment_for_all_namespaces,
+                resource_version=last_resource_version,
+                allow_watch_bookmarks=True,
+                timeout_seconds=3,
+            )
 
-            query = pykube.Deployment.objects(client).filter(namespace=pykube.all)
-
-            for event_type, obj in query.watch(
-                since=last_resource_version, params={"allowWatchBookmarks": "true"}
-            ):
+            for event in stream:
                 # watch can keep running for a long time so we need this here
                 if shutdown:
                     logging.info("Watcher thread: exit")
                     return
 
-                last_resource_version = obj.metadata.get("resourceVersion")
+                obj = event["object"]
+                event_type = event["type"]
+
+                # some events (e.g. BOOKMARK) return a dict
+                if isinstance(obj, dict):
+                    last_resource_version = obj["metadata"]["resourceVersion"]
+                else:
+                    last_resource_version = obj.metadata.resource_version
                 logging.debug(f"watch last_resource_version -> {last_resource_version}")
 
-                if event_type == "ERROR":
-                    logging.warning(f"watch error: {obj.obj}")
-                    # 410 indicates the provided last_resource_version value is expired
-                    if obj.obj["code"] == 410:
-                        logging.debug("watch: last_resource_version -> None")
-                        last_resource_version = None
-                        with ds.lock:
-                            # should be fine because lock is used when processing deployments
-                            ds.deployments.clear()
-                    break
+                match event_type:
+                    case "ADDED" | "MODIFIED" | "DELETED":
+                        logging.debug(
+                            f"watch {event_type}: {obj.metadata.namespace}/{obj.metadata.name}"
+                        )
+                        key = (obj.metadata.namespace, obj.metadata.name)
 
-                if event_type == "BOOKMARK":
-                    logging.debug(f"watch bookmark: {obj.obj}")
-                    continue
-
-                key = (obj.namespace, obj.name)
-                if event_type in ["ADDED", "MODIFIED"] and (
-                    schedules := obj.annotations.get("zalando.org/schedule-actions")
-                ):
-                    with ds.lock:
-                        ds.deployments[key] = parse_schedules(schedules, key)
-                else:
-                    with ds.lock:
-                        ds.deployments.pop(key, None)
+                        if event_type != "DELETED" and (
+                            schedules := obj.metadata.annotations.get(
+                                "zalando.org/schedule-actions"
+                            )
+                        ):
+                            with ds.lock:
+                                ds.deployments[key] = parse_schedules(schedules, key)
+                        else:
+                            with ds.lock:
+                                ds.deployments.pop(key, None)
+                    case _:
+                        logging.debug(f"watch {event_type} {obj}")
 
                 logging.debug(f"Deployments: {ds.deployments}")
 
-        except requests.exceptions.ConnectionError as e:
-            # This catches ReadTimeouts, ConnectionReset, and API restarts
-            logging.error(f"Watch disconnected: {e}. Reconnecting...")
+        except ApiException as e:
+            logging.error(f"Kubernetes API error: {e}")
+
+            # Handle 410 Gone (Resource version too old)
+            if e.status == 410:
+                logging.debug("Resetting watch last_resource_version: expired")
+                last_resource_version = None
+                with ds.lock:
+                    ds.deployments.clear()
 
         except Exception as e:
             logging.error(f"Watcher failed: {type(e).__name__}: {e}")
@@ -341,7 +339,7 @@ if __name__ == "__main__":
     signal(SIGABRT, partial(handle_shutdown, queue=queue, exit_code=134))
 
     # for the watcher, we use a daemon thread so that it won't block graceful shutdown
-    # since there's no easy way to interrupt a watch with pykube and the thread could
+    # since there's no easy way to interrupt a watch and the thread could
     # sleep for a long time
     threading.Thread(target=watch_deployments, args=[ds], daemon=True).start()
 
