@@ -15,6 +15,7 @@ from signal import SIGABRT, SIGINT, SIGQUIT, SIGTERM, signal, strsignal
 from sys import exit
 from types import FrameType
 
+import dateutil
 from croniter import croniter
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
