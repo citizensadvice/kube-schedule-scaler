@@ -9,10 +9,10 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from os import _exit as exit
+from functools import partial
 from queue import Queue
-from signal import SIGINT, SIGQUIT, SIGTERM, signal, strsignal
-from time import sleep
+from signal import SIGABRT, SIGINT, SIGQUIT, SIGTERM, signal, strsignal
+from sys import exit
 from types import FrameType
 
 import pykube
@@ -21,6 +21,11 @@ from croniter import croniter
 
 # custom type
 ScheduleActions = list[dict[str, str]]
+
+# when this is True, gracefully terminate
+shutdown = False
+# exit code to return when all threads are terminated
+exit_status_code = 0
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -200,19 +205,25 @@ def scale_hpa(
 
 def watch_deployments(ds: DeploymentStore) -> None:
     """Sync deployment objects between k8s api server and kube-schedule-scaler"""
+    global shutdown
     logging.info("Starting watcher thread")
 
     last_resource_version = None
-    while True:
+    while not shutdown:
         try:
             # avoid stale tokens by initializing the client at every reconnect
-            api = pykube.HTTPClient(pykube.KubeConfig.from_env(), timeout=120)
+            client = pykube.HTTPClient(pykube.KubeConfig.from_env(), timeout=120)
 
-            query = pykube.Deployment.objects(api).filter(namespace=pykube.all)
+            query = pykube.Deployment.objects(client).filter(namespace=pykube.all)
 
             for event_type, obj in query.watch(
                 since=last_resource_version, params={"allowWatchBookmarks": "true"}
             ):
+                # watch can keep running for a long time so we need this here
+                if shutdown:
+                    logging.info("Watcher thread: exit")
+                    return
+
                 last_resource_version = obj.metadata.get("resourceVersion")
                 logging.debug(f"watch last_resource_version -> {last_resource_version}")
 
@@ -247,22 +258,45 @@ def watch_deployments(ds: DeploymentStore) -> None:
             # This catches ReadTimeouts, ConnectionReset, and API restarts
             logging.error(f"Watch disconnected: {e}. Reconnecting...")
 
+        except Exception as e:
+            logging.error(f"Watcher failed: {type(e).__name__}: {e}")
+            handle_shutdown(SIGQUIT, None, queue, exit_code=2)
 
-def collect_scaling_jobs(ds: DeploymentStore, queue: Queue) -> None:
-    """Collect scaling jobs and adds them to the queue"""
-    logging.info("Starting collector thread")
-    while True:
-        with ds.lock:
-            for deployment, schedule_action in ds.deployments.items():
-                process_deployment(deployment, schedule_action, queue)
-        logging.debug(f"queue items: {list(queue.queue)}")
-        sleep(get_wait_sec())
+    logging.info("Watcher thread: exit")
+
+
+class Collector:
+    # collector is wrapped in a class so that we can use the condition
+    # to notify it and wake it up on graceful shutdown
+    condition = threading.Condition()
+
+    @classmethod
+    def collect_scaling_jobs(cls, ds: DeploymentStore, queue: Queue) -> None:
+        """Collect scaling jobs and adds them to the queue"""
+        global shutdown
+
+        logging.info("Starting collector thread")
+
+        while not shutdown:
+            with ds.lock:
+                for deployment, schedule_action in ds.deployments.items():
+                    process_deployment(deployment, schedule_action, queue)
+            logging.debug(f"queue items: {list(queue.queue)}")
+            # wait until next minute but wake up if you have to shutdown
+            with cls.condition:
+                cls.condition.wait(timeout=get_wait_sec())
+
+        logging.info("Collector thread: exit")
 
 
 def process_scaling_jobs(queue: Queue) -> None:
     """Processes scaling jobs"""
+    global shutdown
     logging.info("Starting processor thread")
-    while True:
+
+    while not shutdown:
+        # this blocks but we can add a dummy item to wake the thread
+        # if we want to shut down gracefully
         item = queue.get()
         match item[0]:
             case ScaleTarget.DEPLOYMENT:
@@ -270,35 +304,57 @@ def process_scaling_jobs(queue: Queue) -> None:
             case ScaleTarget.HORIZONAL_POD_AUTOSCALER:
                 scale_hpa(*item[1:])
 
+    logging.info("Processor thread: exit")
 
-def handle_shutdown(signum: int, _: FrameType | None) -> None:
+
+def handle_shutdown(
+    signum: int, _: FrameType | None, queue: Queue, exit_code: int
+) -> None:
     """Handle shutdown related signals"""
+    global shutdown
+    global exit_status_code
     sig_str = strsignal(signum)
     sig_str = sig_str.split(":")[0] if sig_str else "Unknown"
-    logging.info(f"Received {sig_str}: exiting immediately")
-    exit(0)
+    logging.info(f"Received {sig_str}: exiting gracefully")
+    shutdown = True
+    # wake up the processor
+    queue.put("notify")
+    # wake up the collector
+    with Collector.condition:
+        Collector.condition.notify()
+    exit_status_code = exit_code
 
 
 if __name__ == "__main__":
-    signal(SIGTERM, handle_shutdown)
-    signal(SIGINT, handle_shutdown)
-    signal(SIGQUIT, handle_shutdown)
-
     ds = DeploymentStore()
     queue = Queue()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    signal(SIGTERM, partial(handle_shutdown, queue=queue, exit_code=143))
+    signal(SIGINT, partial(handle_shutdown, queue=queue, exit_code=130))
+    signal(SIGQUIT, partial(handle_shutdown, queue=queue, exit_code=131))
+    signal(SIGABRT, partial(handle_shutdown, queue=queue, exit_code=134))
+
+    # for the watcher, we use a daemon thread so that it won't block graceful shutdown
+    # since there's no easy way to interrupt a watch with pykube and the thread could
+    # sleep for a long time
+    threading.Thread(target=watch_deployments, args=[ds], daemon=True).start()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
-            executor.submit(watch_deployments, ds): "watcher",
-            executor.submit(collect_scaling_jobs, ds, queue): "collector",
+            executor.submit(Collector.collect_scaling_jobs, ds, queue): "collector",
             executor.submit(process_scaling_jobs, queue): "processor",
         }
 
+        # NOTE: block waiting for the tasks, but report their success or failure as
+        # soon as each individual one completes
         for future in concurrent.futures.as_completed(futures):
             task_name = futures[future]
             try:
                 result = future.result()
                 logging.debug(f"success: {task_name}: {result}")
             except Exception as e:
-                logging.fatal(f"failure: task {task_name}: {type(e).__name__}: {e}")
-                exit(1)
+                logging.error(f"failure: task {task_name}: {type(e).__name__}: {e}")
+                handle_shutdown(SIGQUIT, None, queue, exit_code=1)
+
+        # expliticly return the correct status code since we're trapping signals
+        exit(exit_status_code)
