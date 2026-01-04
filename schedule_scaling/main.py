@@ -245,8 +245,9 @@ def watch_deployments(ds: DeploymentStore) -> None:
                                 "zalando.org/schedule-actions"
                             )
                         ):
+                            res = parse_schedules(schedules, key)
                             with ds.lock:
-                                ds.deployments[key] = parse_schedules(schedules, key)
+                                ds.deployments[key] = res
                         else:
                             with ds.lock:
                                 ds.deployments.pop(key, None)
