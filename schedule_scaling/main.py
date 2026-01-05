@@ -190,7 +190,7 @@ def scale_hpa(
         else:
             logging.error("API error patching HPA %s/%s: %s", namespace, name, e)
 
-def process_watch_event(ds: DeploymentStore, event: dict) -> None:
+def process_watch_event(ds: DeploymentStore, event: dict) -> str:
     obj: dict | V1Deployment = event["object"]
     event_type = event["type"]
 
@@ -198,9 +198,9 @@ def process_watch_event(ds: DeploymentStore, event: dict) -> None:
     if isinstance(obj, dict):
         last_resource_version = obj["metadata"]["resourceVersion"]
     else:
-        last_resource_version = cast(
+        last_resource_version = cast(str, cast(
             V1ObjectMeta, obj.metadata
-        ).resource_version
+        ).resource_version)
     logging.debug(f"watch last_resource_version -> {last_resource_version}")
 
     match event_type:
@@ -227,6 +227,8 @@ def process_watch_event(ds: DeploymentStore, event: dict) -> None:
                     ds.deployments.pop(key, None)
         case _:
             logging.debug(f"watch {event_type} {obj}")
+
+    return last_resource_version
 
 
 
@@ -259,7 +261,7 @@ def watch_deployments(ds: DeploymentStore) -> None:
                     logging.warning(f"Skipping non dict event data: {event}")
                     continue
 
-                process_watch_event(ds, event)
+                last_resource_version = process_watch_event(ds, event)
 
                 logging.debug(f"Deployments: {ds.deployments}")
 

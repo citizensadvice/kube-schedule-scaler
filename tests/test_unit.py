@@ -27,7 +27,9 @@ with (
     )
 
 
-def create_mock_event(event_type, name, namespace, annotations=None):
+def create_mock_event(
+    event_type, name, namespace, annotations=None, resource_version="123"
+):
     """Helper to create a mock watch event."""
     return {
         "type": event_type,
@@ -36,7 +38,7 @@ def create_mock_event(event_type, name, namespace, annotations=None):
                 name=name,
                 namespace=namespace,
                 annotations=annotations or {},
-                resource_version="123",
+                resource_version=resource_version,
             )
         ),
     }
@@ -72,6 +74,19 @@ def test_get_delta_sec_not_triggered():
     schedule = "0 9 * * *"
     delta = get_delta_sec(schedule)
     assert delta == 90
+
+
+def test_process_event_returns_resource_version(ds):
+    schedule_json = '[{"schedule": "0 9 * * *", "replicas": 5}]'
+    event = create_mock_event(
+        "ADDED",
+        "app-1",
+        "default",
+        {"zalando.org/schedule-actions": schedule_json},
+        resource_version="12345",
+    )
+
+    assert process_watch_event(ds, event) == "12345"
 
 
 def test_process_event_added_with_schedule(ds):
