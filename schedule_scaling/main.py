@@ -382,5 +382,5 @@ if __name__ == "__main__":
                 logging.error(f"failure: task {task_name}: {type(e).__name__}: {e}")
                 handle_shutdown(SIGQUIT, None, queue, exit_code=1)
 
-        # expliticly return the correct status code since we're trapping signals
-        exit(exit_status_code)
+    # expliticly return the correct status code since we're trapping signals
+    exit(exit_status_code)
