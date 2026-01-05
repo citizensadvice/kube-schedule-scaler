@@ -272,10 +272,13 @@ def watch_deployments(ds: DeploymentStore) -> None:
                 last_resource_version = None
                 with ds.lock:
                     ds.deployments.clear()
+            else:
+                logging.error(f"Watcher failed: {type(e).__name__}: {e}")
+                handle_shutdown(SIGQUIT, None, queue, exit_code=2)
 
         except Exception as e:
             logging.error(f"Watcher failed: {type(e).__name__}: {e}")
-            handle_shutdown(SIGQUIT, None, queue, exit_code=2)
+            handle_shutdown(SIGQUIT, None, queue, exit_code=3)
 
     logging.info("Watcher thread: exit")
 
