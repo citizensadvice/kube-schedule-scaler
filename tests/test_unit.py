@@ -236,7 +236,7 @@ def test_scale_hpa_partial_patch_min_replicas(mock_patch):
     "schedule_scaling.main.autoscaling_v1.patch_namespaced_horizontal_pod_autoscaler"
 )
 def test_scale_hpa_partial_patch_max_replicas(mock_patch):
-    # Test case: Only min_replicas is provided
+    # Test case: Only max_replicas is provided
     scale_hpa("partial-hpa", "my-ns", min_replicas=None, max_replicas=5)
 
     # Verify that the patch body only contains the provided field
