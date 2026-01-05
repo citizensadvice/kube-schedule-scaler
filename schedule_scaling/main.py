@@ -190,6 +190,42 @@ def scale_hpa(
         else:
             logging.error("API error patching HPA %s/%s: %s", namespace, name, e)
 
+def process_watch_event(ds: DeploymentStore, event: dict) -> None:
+    obj: dict | V1Deployment = event["object"]
+    event_type = event["type"]
+
+    # some events (e.g. BOOKMARK) return a dict
+    if isinstance(obj, dict):
+        last_resource_version = obj["metadata"]["resourceVersion"]
+    else:
+        last_resource_version = cast(
+            V1ObjectMeta, obj.metadata
+        ).resource_version
+    logging.debug(f"watch last_resource_version -> {last_resource_version}")
+
+    match event_type:
+        case "ADDED" | "MODIFIED" | "DELETED":
+            metadata = cast(V1ObjectMeta, obj.metadata)
+            logging.debug(
+                f"watch {event_type}: {metadata.namespace}/{metadata.name}"
+            )
+            key = (cast(str, metadata.namespace), cast(str, metadata.name))
+
+            if event_type != "DELETED" and (
+                schedules := cast(dict[str, str], metadata.annotations).get(
+                    "zalando.org/schedule-actions"
+                )
+            ):
+                res = parse_schedules(schedules, key)
+                with ds.lock:
+                    ds.deployments[key] = res
+            else:
+                with ds.lock:
+                    ds.deployments.pop(key, None)
+        case _:
+            logging.debug(f"watch {event_type} {obj}")
+
+
 
 def watch_deployments(ds: DeploymentStore) -> None:
     """Sync deployment objects between k8s api server and kube-schedule-scaler"""
@@ -211,48 +247,16 @@ def watch_deployments(ds: DeploymentStore) -> None:
             )
 
             for event in stream:
-                if not isinstance(event, dict):
-                    logging.warning(f"Skipping non dict event data: {event}")
-                    continue
-
                 # watch can keep running for a long time so we need this here
                 if shutdown:
                     logging.info("Watcher thread: exit")
                     return
 
-                obj: dict | V1Deployment = event["object"]
-                event_type = event["type"]
+                if not isinstance(event, dict):
+                    logging.warning(f"Skipping non dict event data: {event}")
+                    continue
 
-                # some events (e.g. BOOKMARK) return a dict
-                if isinstance(obj, dict):
-                    last_resource_version = obj["metadata"]["resourceVersion"]
-                else:
-                    last_resource_version = cast(
-                        V1ObjectMeta, obj.metadata
-                    ).resource_version
-                logging.debug(f"watch last_resource_version -> {last_resource_version}")
-
-                match event_type:
-                    case "ADDED" | "MODIFIED" | "DELETED":
-                        metadata = cast(V1ObjectMeta, obj.metadata)
-                        logging.debug(
-                            f"watch {event_type}: {metadata.namespace}/{metadata.name}"
-                        )
-                        key = (cast(str, metadata.namespace), cast(str, metadata.name))
-
-                        if event_type != "DELETED" and (
-                            schedules := cast(dict[str, str], metadata.annotations).get(
-                                "zalando.org/schedule-actions"
-                            )
-                        ):
-                            res = parse_schedules(schedules, key)
-                            with ds.lock:
-                                ds.deployments[key] = res
-                        else:
-                            with ds.lock:
-                                ds.deployments.pop(key, None)
-                    case _:
-                        logging.debug(f"watch {event_type} {obj}")
+                process_watch_event(ds, event)
 
                 logging.debug(f"Deployments: {ds.deployments}")
 
