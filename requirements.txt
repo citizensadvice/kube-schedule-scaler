@@ -1,2 +1,2 @@
-pykube-ng==23.6.0
+kubernetes==34.1.0
 croniter==2.0.7

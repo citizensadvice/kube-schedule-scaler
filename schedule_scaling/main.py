@@ -1,15 +1,43 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Main module of kube-schedule-scaler"""
 
+import concurrent.futures
 import json
 import logging
 import os
+import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from time import sleep
+from enum import Enum
+from functools import partial
+from queue import Queue
+from signal import SIGABRT, SIGINT, SIGQUIT, SIGTERM, signal, strsignal
+from sys import exit
+from types import FrameType
+from typing import cast
 
-import dateutil.tz
-import pykube
+import dateutil
 from croniter import croniter
+from kubernetes import client, config, watch
+from kubernetes.client.models import V1Deployment, V1ObjectMeta
+from kubernetes.client.rest import ApiException
+
+# client is shared across the program
+try:
+    config.load_incluster_config()
+except config.ConfigException:
+    config.load_kube_config()
+
+apps_v1 = client.AppsV1Api()
+autoscaling_v1 = client.AutoscalingV1Api()
+
+# custom type
+ScheduleActions = list[dict[str, str]]
+
+# when this is True, gracefully terminate
+shutdown = False
+# exit code to return when all threads are terminated
+exit_status_code = 0
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -18,37 +46,22 @@ logging.basicConfig(
 )
 
 
-def get_kube_api() -> pykube.HTTPClient:
-    """Initiating the API from Service Account or when running locally from ~/.kube/config"""
-    return pykube.HTTPClient(pykube.KubeConfig.from_env())
+class ScaleTarget(Enum):
+    DEPLOYMENT = 0
+    HORIZONAL_POD_AUTOSCALER = 1
 
 
-def deployments_to_scale() -> dict[tuple[str, str], list[dict[str, str]]]:
-    """Getting the deployments configured for schedule scaling"""
-    deployments = []
-    scaling_dict = {}
-    for deployment in pykube.Deployment.objects(api).filter(namespace=pykube.all):
-        f_deployment: tuple[str, str] = (deployment.namespace, deployment.name)
+@dataclass
+class DeploymentStore:
+    deployments: dict[tuple[str, str], ScheduleActions]
+    lock: threading.Lock
 
-        annotations = deployment.metadata.get("annotations", {})
-        schedule_actions = parse_schedules(
-            annotations.get("zalando.org/schedule-actions", "[]"), f_deployment
-        )
-
-        if not schedule_actions:
-            continue
-
-        deployments.append([deployment.metadata["name"]])
-        scaling_dict[f_deployment] = schedule_actions
-    if not deployments:
-        logging.info("No deployment is configured for schedule scaling")
-
-    return scaling_dict
+    def __init__(self) -> None:
+        self.deployments = {}
+        self.lock = threading.Lock()
 
 
-def parse_schedules(
-    schedules: str, identifier: tuple[str, str]
-) -> list[dict[str, str]]:
+def parse_schedules(schedules: str, identifier: tuple[str, str]) -> ScheduleActions:
     """Parse the JSON schedule"""
     try:
         return json.loads(schedules)
@@ -85,10 +98,12 @@ def get_wait_sec() -> float:
     return (future - now).total_seconds()
 
 
-def process_deployment(deployment: tuple[str, str], schedules: list[dict[str, str]]) -> None:
+def process_deployment(
+    deployment: tuple[str, str], sa: ScheduleActions, queue: Queue
+) -> None:
     """Determine actions to run for the given deployment and list of schedules"""
     namespace, name = deployment
-    for schedule in schedules:
+    for schedule in sa:
         # when provided, convert the values to int
         replicas = schedule.get("replicas", None)
         if replicas is not None:
@@ -111,66 +126,55 @@ def process_deployment(deployment: tuple[str, str], schedules: list[dict[str, st
         # if less than 60 seconds have passed from the trigger
         if get_delta_sec(schedule_expr, schedule_timezone) < 60:
             if replicas is not None:
-                scale_deployment(name, namespace, replicas)
+                queue.put((ScaleTarget.DEPLOYMENT, name, namespace, replicas))
             if min_replicas is not None or max_replicas is not None:
-                scale_hpa(name, namespace, min_replicas, max_replicas)
+                queue.put(
+                    (
+                        ScaleTarget.HORIZONAL_POD_AUTOSCALER,
+                        name,
+                        namespace,
+                        min_replicas,
+                        max_replicas,
+                    )
+                )
 
 
 def scale_deployment(name: str, namespace: str, replicas: int) -> None:
     """Scale the deployment to the given number of replicas"""
     try:
-        deployment = (
-            pykube.Deployment.objects(api).filter(namespace=namespace).get(name=name)
+        patch_body = {"spec": {"replicas": replicas}}
+        apps_v1.patch_namespaced_deployment_scale(
+            name=name, namespace=namespace, body=patch_body
         )
-    except pykube.exceptions.ObjectDoesNotExist:
-        logging.warning("Deployment %s/%s does not exist", namespace, name)
-        return
-
-    if replicas == deployment.replicas:
-        return
-
-    try:
-        deployment.patch({"spec": {"replicas": replicas}}, subresource="scale")
         logging.info(
             "Deployment %s/%s scaled to %s replicas", namespace, name, replicas
         )
-
-    except pykube.exceptions.HTTPError as err:
-        logging.error(
-            "Exception raised while patching deployment %s/%s", namespace, name
-        )
-        logging.exception(err)
+    except ApiException as e:
+        if e.status == 404:
+            logging.warning("Deployment %s/%s not found", namespace, name)
+        else:
+            logging.error("API error patching deployment %s/%s: %s", namespace, name, e)
 
 
 def scale_hpa(
     name: str, namespace: str, min_replicas: int | None, max_replicas: int | None
 ) -> None:
-    """Adjust hpa min and max number of replicas"""
+    """Adjust HPA min/max replicas via a direct patch"""
+
+    patch_body = {}
+    if min_replicas is not None:
+        patch_body["minReplicas"] = min_replicas
+    if max_replicas is not None:
+        patch_body["maxReplicas"] = max_replicas
+
+    if not patch_body:
+        return
 
     try:
-        hpa = (
-            pykube.HorizontalPodAutoscaler.objects(api)
-            .filter(namespace=namespace)
-            .get(name=name)
+        autoscaling_v1.patch_namespaced_horizontal_pod_autoscaler(
+            name=name, namespace=namespace, body={"spec": patch_body}
         )
-    except pykube.exceptions.ObjectDoesNotExist:
-        logging.warning("HPA %s/%s does not exist", namespace, name)
-        return
 
-    patch = {}
-
-    spec = hpa.obj["spec"]
-    if min_replicas is not None and min_replicas != spec["minReplicas"]:
-        patch["minReplicas"] = min_replicas
-
-    if max_replicas is not None and max_replicas != spec["maxReplicas"]:
-        patch["maxReplicas"] = max_replicas
-
-    if not patch:
-        return
-
-    try:
-        hpa.patch({"spec": patch})
         if min_replicas:
             logging.info(
                 "HPA %s/%s minReplicas set to %s", namespace, name, min_replicas
@@ -179,19 +183,199 @@ def scale_hpa(
             logging.info(
                 "HPA %s/%s maxReplicas set to %s", namespace, name, max_replicas
             )
-    except pykube.exceptions.HTTPError as err:
-        logging.error("Exception raised while patching HPA %s/%s", namespace, name)
-        logging.exception(err)
+
+    except ApiException as e:
+        if e.status == 404:
+            logging.warning("HPA %s/%s not found", namespace, name)
+        else:
+            logging.error("API error patching HPA %s/%s: %s", namespace, name, e)
+
+def process_watch_event(ds: DeploymentStore, event: dict) -> None:
+    obj: dict | V1Deployment = event["object"]
+    event_type = event["type"]
+
+    # some events (e.g. BOOKMARK) return a dict
+    if isinstance(obj, dict):
+        last_resource_version = obj["metadata"]["resourceVersion"]
+    else:
+        last_resource_version = cast(
+            V1ObjectMeta, obj.metadata
+        ).resource_version
+    logging.debug(f"watch last_resource_version -> {last_resource_version}")
+
+    match event_type:
+        case "ADDED" | "MODIFIED" | "DELETED":
+            if not isinstance(obj, V1Deployment):
+                raise ValueError(f"{event_type} event is not a V1Deployment object")
+
+            metadata = cast(V1ObjectMeta, obj.metadata)
+            logging.debug(
+                f"watch {event_type}: {metadata.namespace}/{metadata.name}"
+            )
+            key = (cast(str, metadata.namespace), cast(str, metadata.name))
+
+            if event_type != "DELETED" and (
+                schedules := cast(dict[str, str], metadata.annotations).get(
+                    "zalando.org/schedule-actions"
+                )
+            ):
+                res = parse_schedules(schedules, key)
+                with ds.lock:
+                    ds.deployments[key] = res
+            else:
+                with ds.lock:
+                    ds.deployments.pop(key, None)
+        case _:
+            logging.debug(f"watch {event_type} {obj}")
+
+
+
+def watch_deployments(ds: DeploymentStore) -> None:
+    """Sync deployment objects between k8s api server and kube-schedule-scaler"""
+    global shutdown
+    logging.info("Starting watcher thread")
+
+    w = watch.Watch()
+
+    last_resource_version = None
+    while not shutdown:
+        try:
+            # watch bookmarks help with having the latest resource version
+            # necessary to resume the event stream (on reconnect) without
+            # getting 410 "Resource version too old" errors
+            stream = w.stream(
+                apps_v1.list_deployment_for_all_namespaces,
+                resource_version=last_resource_version,
+                allow_watch_bookmarks=True,
+            )
+
+            for event in stream:
+                # watch can keep running for a long time so we need this here
+                if shutdown:
+                    logging.info("Watcher thread: exit")
+                    return
+
+                if not isinstance(event, dict):
+                    logging.warning(f"Skipping non dict event data: {event}")
+                    continue
+
+                process_watch_event(ds, event)
+
+                logging.debug(f"Deployments: {ds.deployments}")
+
+        except ApiException as e:
+            logging.error(f"Kubernetes API error: {e}")
+
+            # Handle 410 Gone (Resource version too old)
+            if e.status == 410:
+                logging.debug("Resetting watch last_resource_version: expired")
+                last_resource_version = None
+                with ds.lock:
+                    ds.deployments.clear()
+
+        except Exception as e:
+            logging.error(f"Watcher failed: {type(e).__name__}: {e}")
+            handle_shutdown(SIGQUIT, None, queue, exit_code=2)
+
+    logging.info("Watcher thread: exit")
+
+
+class Collector:
+    # collector is wrapped in a class so that we can use the condition
+    # to notify it and wake it up on graceful shutdown
+    condition = threading.Condition()
+
+    @classmethod
+    def collect_scaling_jobs(cls, ds: DeploymentStore, queue: Queue) -> None:
+        """Collect scaling jobs and adds them to the queue"""
+        global shutdown
+
+        logging.info("Starting collector thread")
+
+        while not shutdown:
+            with ds.lock:
+                for deployment, schedule_action in ds.deployments.items():
+                    process_deployment(deployment, schedule_action, queue)
+            logging.debug(f"queue items: {list(queue.queue)}")
+            # wait until next minute but wake up if you have to shutdown
+            with cls.condition:
+                cls.condition.wait_for(lambda: shutdown, timeout=get_wait_sec())
+
+        logging.info("Collector thread: exit")
+
+
+def process_scaling_jobs(queue: Queue) -> None:
+    """Processes scaling jobs"""
+    global shutdown
+    logging.info("Starting processor thread")
+
+    while not shutdown:
+        # this blocks but we can add a dummy item to wake the thread
+        # if we want to shut down gracefully
+        item = queue.get()
+        match item[0]:
+            case ScaleTarget.DEPLOYMENT:
+                scale_deployment(*item[1:])
+            case ScaleTarget.HORIZONAL_POD_AUTOSCALER:
+                scale_hpa(*item[1:])
+
+    logging.info("Processor thread: exit")
+
+
+def handle_shutdown(
+    signum: int, _: FrameType | None, queue: Queue, exit_code: int
+) -> None:
+    """Handle shutdown related signals"""
+    global shutdown
+    global exit_status_code
+
+    if shutdown:
+        # it means it's been already triggered by another signal before
+        # no need to do the work twice and it can cause issues
+        return
+
+    sig_str = strsignal(signum)
+    sig_str = sig_str.split(":")[0] if sig_str else "Unknown"
+    logging.info(f"Received {sig_str}: exiting gracefully")
+    shutdown = True
+    # wake up the processor
+    queue.put("notify")
+    # wake up the collector
+    with Collector.condition:
+        Collector.condition.notify()
+    exit_status_code = exit_code
 
 
 if __name__ == "__main__":
-    logging.info("Main loop started")
-    while True:
-        global api
-        api = get_kube_api()
+    ds = DeploymentStore()
+    queue = Queue()
 
-        logging.debug("Waiting until the next minute")
-        sleep(get_wait_sec())
-        logging.debug("Getting deployments")
-        for d, s in deployments_to_scale().items():
-            process_deployment(d, s)
+    signal(SIGTERM, partial(handle_shutdown, queue=queue, exit_code=143))
+    signal(SIGINT, partial(handle_shutdown, queue=queue, exit_code=130))
+    signal(SIGQUIT, partial(handle_shutdown, queue=queue, exit_code=131))
+    signal(SIGABRT, partial(handle_shutdown, queue=queue, exit_code=134))
+
+    # for the watcher, we use a daemon thread so that it won't block graceful shutdown
+    # since there's no easy way to interrupt a watch and the thread could
+    # sleep for a long time
+    threading.Thread(target=watch_deployments, args=[ds], daemon=True).start()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(Collector.collect_scaling_jobs, ds, queue): "collector",
+            executor.submit(process_scaling_jobs, queue): "processor",
+        }
+
+        # NOTE: block waiting for the tasks, but report their success or failure as
+        # soon as each individual one completes
+        for future in concurrent.futures.as_completed(futures):
+            task_name = futures[future]
+            try:
+                result = future.result()
+                logging.debug(f"success: {task_name}: {result}")
+            except Exception as e:
+                logging.error(f"failure: task {task_name}: {type(e).__name__}: {e}")
+                handle_shutdown(SIGQUIT, None, queue, exit_code=1)
+
+        # expliticly return the correct status code since we're trapping signals
+        exit(exit_status_code)
