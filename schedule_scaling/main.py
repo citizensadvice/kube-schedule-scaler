@@ -205,6 +205,9 @@ def process_watch_event(ds: DeploymentStore, event: dict) -> None:
 
     match event_type:
         case "ADDED" | "MODIFIED" | "DELETED":
+            if not isinstance(obj, V1Deployment):
+                raise ValueError(f"{event_type} event is not a V1Deployment object")
+
             metadata = cast(V1ObjectMeta, obj.metadata)
             logging.debug(
                 f"watch {event_type}: {metadata.namespace}/{metadata.name}"
