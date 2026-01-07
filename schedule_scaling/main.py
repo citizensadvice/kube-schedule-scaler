@@ -118,7 +118,10 @@ def process_deployment(
         schedule_expr = schedule.get("schedule", None)
 
         if not schedule_expr:
-            return
+            logging.warning(
+                f"Ignoring expression with no schedule in {namespace}/{name}: {schedule}"
+            )
+            continue
 
         schedule_timezone = schedule.get("tz", None)
         logging.debug("%s %s", deployment, schedule)
