@@ -300,8 +300,11 @@ class Collector:
 
         while not shutdown:
             with ds.lock:
-                for deployment, schedule_action in ds.deployments.items():
-                    process_deployment(deployment, schedule_action, queue)
+                # work on a copy so that we can release the lock sooner
+                deployments = ds.deployments.copy()
+
+            for deployment, schedule_action in deployments.items():
+                process_deployment(deployment, schedule_action, queue)
             logging.debug(f"queue items: {list(queue.queue)}")
             # wait until next minute but wake up if you have to shutdown
             with cls.condition:
