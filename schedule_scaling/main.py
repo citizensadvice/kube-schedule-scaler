@@ -190,6 +190,7 @@ def scale_hpa(
         else:
             logging.error("API error patching HPA %s/%s: %s", namespace, name, e)
 
+
 def process_watch_event(ds: DeploymentStore, event: dict) -> str:
     obj: dict | V1Deployment = event["object"]
     event_type = event["type"]
@@ -198,9 +199,9 @@ def process_watch_event(ds: DeploymentStore, event: dict) -> str:
     if isinstance(obj, dict):
         last_resource_version = obj["metadata"]["resourceVersion"]
     else:
-        last_resource_version = cast(str, cast(
-            V1ObjectMeta, obj.metadata
-        ).resource_version)
+        last_resource_version = cast(
+            str, cast(V1ObjectMeta, obj.metadata).resource_version
+        )
     logging.debug(f"watch last_resource_version -> {last_resource_version}")
 
     match event_type:
@@ -209,9 +210,7 @@ def process_watch_event(ds: DeploymentStore, event: dict) -> str:
                 raise ValueError(f"{event_type} event is not a V1Deployment object")
 
             metadata = cast(V1ObjectMeta, obj.metadata)
-            logging.debug(
-                f"watch {event_type}: {metadata.namespace}/{metadata.name}"
-            )
+            logging.debug(f"watch {event_type}: {metadata.namespace}/{metadata.name}")
             key = (cast(str, metadata.namespace), cast(str, metadata.name))
 
             if event_type != "DELETED" and (
@@ -231,8 +230,7 @@ def process_watch_event(ds: DeploymentStore, event: dict) -> str:
     return last_resource_version
 
 
-
-def watch_deployments(ds: DeploymentStore) -> None:
+def watch_deployments(ds: DeploymentStore, queue: Queue) -> None:
     """Sync deployment objects between k8s api server and kube-schedule-scaler"""
     global shutdown
     logging.info("Starting watcher thread")
@@ -363,7 +361,7 @@ if __name__ == "__main__":
     # for the watcher, we use a daemon thread so that it won't block graceful shutdown
     # since there's no easy way to interrupt a watch and the thread could
     # sleep for a long time
-    threading.Thread(target=watch_deployments, args=[ds], daemon=True).start()
+    threading.Thread(target=watch_deployments, args=[ds, queue], daemon=True).start()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
