@@ -16,6 +16,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    if: github.repository == 'citizensadvice/kube-schedule-scaler'
     steps:
     - name: Checkout
       uses: actions/checkout@v4
